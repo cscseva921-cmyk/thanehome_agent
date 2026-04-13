@@ -1,26 +1,35 @@
-name: JavaGoat-WhatsApp-Bot
+name: Real Estate Bot Deploy
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
-  schedule:
-    - cron: '0 */5 * * *' 
 
 jobs:
-  build:
+  run-bot:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      # 📥 Code checkout
+      - name: Checkout Repository
+        uses: actions/checkout@v3
 
+      # 🟢 Node.js setup
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v3
         with:
-          node-version: '20'
+          node-version: 18
 
+      # 📦 Install dependencies
       - name: Install Dependencies
         run: npm install
 
-      - name: Start AI Bot
-        env:
-          FIREBASE_URL: ${{ secrets.FIREBASE_URL }}
-        run: npm start
+      # 🔐 Environment Variables
+      - name: Create .env file
+        run: |
+          echo "FIREBASE_URL=${{ secrets.FIREBASE_URL }}" >> .env
+
+      # 🚀 Run Bot
+      - name: Start WhatsApp Bot
+        run: node index.js

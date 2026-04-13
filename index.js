@@ -2,39 +2,36 @@ const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLat
 const qrcode = require('qrcode-terminal');
 const pino = require('pino');
 
+// 🌟 SECURE FIREBASE URL FROM GITHUB SECRETS 🌟
 const FIREBASE_URL = process.env.FIREBASE_URL;
-const leadStates = {};
 
-async function getProperties() {
+const orderStates = {}; 
+
+// Function to fetch the dynamic menu from your App's Firebase
+async function getMenuFromApp() {
     try {
-        const res = await fetch(`${FIREBASE_URL}/properties.json`);
-        const data = await res.json();
-        if (!data) return [];
-
+        const response = await fetch(`${FIREBASE_URL}/dishes.json`);
+        const data = await response.json();
+        if (!data) return[];
+        
+        // Convert Firebase object into an array (now includes imageUrl)
         return Object.keys(data).map(key => ({
             id: key,
-            ...data[key]
+            name: data[key].name,
+            price: data[key].price,
+            imageUrl: data[key].imageUrl
         }));
-    } catch {
-        return [];
+    } catch (error) {
+        console.error("Failed to fetch menu:", error);
+        return[];
     }
 }
 
-function filterProperties(properties, text) {
-    return properties.filter(p => {
-        const t = text.toLowerCase();
-
-        return (
-            (!t.includes("2bhk") || p.type === "2BHK") &&
-            (!t.includes("3bhk") || p.type === "3BHK") &&
-            (!t.includes("thane") || p.location.toLowerCase().includes("thane")) &&
-            (!t.includes("pune") || p.location.toLowerCase().includes("pune")) &&
-            (!t.includes("under 50") || parseInt(p.price) <= 5000000)
-        );
-    });
-}
-
 async function startBot() {
+    if (!FIREBASE_URL) {
+        console.log("❌ ERROR: FIREBASE_URL is missing in GitHub Secrets!");
+        process.exit(1);
+    }
 
     const { state, saveCreds } = await useMultiFileAuthState('session_data');
     const { version } = await fetchLatestBaileysVersion();
@@ -42,99 +39,145 @@ async function startBot() {
     const sock = makeWASocket({
         version,
         auth: state,
+        printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
+        browser:["S", "K", "1"] 
     });
 
-    sock.ev.on('connection.update', ({ connection, qr }) => {
-        if (qr) qrcode.generate(qr, { small: true });
-        if (connection === 'open') console.log("✅ BOT LIVE");
+    sock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect, qr } = update;
+        
+        if (qr) {
+            console.clear(); 
+            console.log('\n==================================================');
+            console.log('⚠️ QR CODE TOO BIG? CLICK "View raw logs" in top right!');
+            console.log('==================================================\n');
+            qrcode.generate(qr, { small: true }); 
+        }
+
+        if (connection === 'open') console.log('✅ JAVAGOAT AI IS ONLINE!');
+        if (connection === 'close') {
+            const reason = lastDisconnect?.error?.output?.statusCode;
+            if (reason !== DisconnectReason.loggedOut) startBot();
+        }
     });
 
     sock.ev.on('creds.update', saveCreds);
 
-    sock.ev.on('messages.upsert', async ({ messages }) => {
-        const msg = messages[0];
-        if (!msg.message || msg.key.fromMe) return;
+    sock.ev.on('messages.upsert', async (m) => {
+        const msg = m.messages[0];
+        if (!msg.message || msg.key.remoteJid === 'status@broadcast') return;
+        if (msg.key.fromMe) return; // Loop Protection
 
         const sender = msg.key.remoteJid;
-        const text = (msg.message.conversation || "").toLowerCase();
+        const text = (msg.message.conversation || msg.message.extendedTextMessage?.text || "").toLowerCase();
 
-        // STEP 2: SAVE LEAD
-        if (leadStates[sender]?.step === "DETAILS") {
-            const property = leadStates[sender].property;
-            const phone = sender.split("@")[0];
+        console.log(`📩 Query: ${text}`);
 
-            const lead = {
-                details: text,
-                phone,
-                property: property.name,
-                price: property.price,
-                location: property.location,
-                time: new Date().toISOString()
+        // --- 🛒 STEP 2: FINISH ORDER & SEND TO ADMIN PANEL ---
+        if (orderStates[sender]?.step === 'WAITING_FOR_ADDRESS') {
+            const customerDetails = text; // This now contains Name, Phone, and Address
+            const item = orderStates[sender].item;
+            const customerWaNumber = sender.split('@')[0];
+
+            // Match the exact format of your JavaGoat Admin Panel
+            const javaGoatOrder = {
+                userId: "whatsapp_" + customerWaNumber,
+                userEmail: "whatsapp@javagoat.com",
+                phone: customerWaNumber, // Keeps their WA number registered
+                address: customerDetails, // Saves Name, Phone, and Address typed by them
+                location: { lat: 0, lng: 0 },
+                items:[{
+                    id: item.id,
+                    name: item.name,
+                    price: parseFloat(item.price),
+                    img: item.imageUrl || "",
+                    quantity: 1
+                }],
+                total: (parseFloat(item.price) + 50).toFixed(2), // Price + 50 Delivery Fee
+                status: "Placed",
+                method: "Cash on Delivery (WhatsApp)",
+                timestamp: new Date().toISOString()
             };
 
-            await fetch(`${FIREBASE_URL}/leads.json`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(lead)
-            });
+            // Save order securely via REST API
+            try {
+                await fetch(`${FIREBASE_URL}/orders.json`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(javaGoatOrder)
+                });
+            } catch (error) {
+                console.log("Firebase Error: ", error);
+            }
 
-            await sock.sendMessage(sender, {
-                text: "✅ Enquiry sent! Our agent will call you."
-            });
-
-            delete leadStates[sender];
+            await sock.sendMessage(sender, { text: `✅ *Order Placed Successfully!* \n\nThank you! Your order for *${item.name}* is being prepared. \n\n*Total:* ₹${javaGoatOrder.total} (Inc. Delivery)\n*Status:* Preparing\n\nWe will deliver it to your address soon.` });
+            delete orderStates[sender]; 
             return;
         }
 
-        // PROPERTY SEARCH
-        if (text.includes("buy") || text.includes("2bhk") || text.includes("3bhk")) {
+        // --- 🌟 STEP 1: START ORDER FLOW (WITH IMAGE & PHONE REQUEST) ---
+        if (text.startsWith("order ")) {
+            const productRequested = text.replace("order ", "").trim().toLowerCase();
+            const currentMenu = await getMenuFromApp();
+            
+            // Search the live database for the requested item
+            const matchedItem = currentMenu.find(item => item.name.toLowerCase().includes(productRequested));
 
-            const properties = await getProperties();
-            const results = filterProperties(properties, text);
-
-            if (results.length === 0) {
-                await sock.sendMessage(sender, { text: "❌ No matching property found" });
+            if (!matchedItem) {
+                await sock.sendMessage(sender, { text: `❌ Sorry, we couldn't find *${productRequested}* in our menu today.\n\nType *menu* to see all available items.` });
                 return;
             }
 
-            for (let p of results.slice(0, 3)) {
-                leadStates[sender] = { step: "DETAILS", property: p };
-
-                await sock.sendMessage(sender, {
-                    image: { url: p.images[0] },
-                    caption: `🏠 ${p.name}\n📍 ${p.location}\n💰 ₹${p.price}\n\nReply YES to enquire`
+            orderStates[sender] = { step: 'WAITING_FOR_ADDRESS', item: matchedItem };
+            
+            // 🌟 NEW: SEND PRODUCT IMAGE + ASK FOR PHONE NUMBER 🌟
+            const captionText = `🛒 *Order Started!* \n\nYou selected: *${matchedItem.name}* (₹${matchedItem.price})\n\nPlease reply with your *Full Name, Phone Number, and Delivery Address*.`;
+            
+            // If the product has an image URL in Firebase, send it as a WhatsApp Photo
+            if (matchedItem.imageUrl) {
+                await sock.sendMessage(sender, { 
+                    image: { url: matchedItem.imageUrl }, 
+                    caption: captionText 
                 });
+            } else {
+                // Fallback if no image is found
+                await sock.sendMessage(sender, { text: captionText });
             }
         }
+        else if (text === "order") { 
+            await sock.sendMessage(sender, { text: "🛒 *How to order:* \nPlease type 'order' followed by the dish name. \nExample: *order pizza*" });
+        }
+        
+        // --- DYNAMIC MENU FEATURE ---
+        else if (text.includes("menu") || text.includes("price") || text.includes("list") || text.includes("food")) {
+            const currentMenu = await getMenuFromApp();
+            
+            if (currentMenu.length === 0) {
+                await sock.sendMessage(sender, { text: "Our menu is currently empty or updating. Please check back soon!" });
+                return;
+            }
 
-        // CONFIRM
-        else if (text === "yes" && leadStates[sender]) {
-            leadStates[sender].step = "DETAILS";
-
-            await sock.sendMessage(sender, {
-                text: "Please send Name + Phone + Requirement"
+            let menuMessage = "🍔 *JAVAGOAT LIVE MENU* 🍕\n\n";
+            currentMenu.forEach(item => {
+                menuMessage += `🔸 *${item.name}* - ₹${item.price}\n`;
             });
+            menuMessage += "\n_To order, reply with 'order [dish name]'_";
+            
+            await sock.sendMessage(sender, { text: menuMessage });
         }
 
-        // LIST
-        else if (text === "list") {
-            const props = await getProperties();
-
-            let msgText = "🏠 Properties:\n\n";
-            props.forEach(p => {
-                msgText += `${p.name} - ₹${p.price}\n`;
-            });
-
-            await sock.sendMessage(sender, { text: msgText });
+        // --- GREETINGS ---
+        else if (text.includes("hi") || text.includes("hello") || text.includes("hey")) {
+            await sock.sendMessage(sender, { text: "👋 *Welcome to JavaGoat!* \n\nI am your AI Assistant. Type *menu* to see our delicious food, or type *order [dish]* to buy instantly!" });
         }
-
+        else if (text.includes("contact") || text.includes("call")) {
+            await sock.sendMessage(sender, { text: "📞 *Contact JavaGoat:* \n\n- *Email:* support@javagoat.com" });
+        }
         else {
-            await sock.sendMessage(sender, {
-                text: "👋 Type:\n1. list\n2. 2BHK Thane\n3. buy property"
-            });
+            await sock.sendMessage(sender, { text: "🤔 I didn't quite catch that.\n\nType *menu* to see our food list, or *order [food]* to place an order!" });
         }
     });
 }
 
-startBot();
+startBot().catch(err => console.log("Error: " + err));
